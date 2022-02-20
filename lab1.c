@@ -1,14 +1,20 @@
 #include <linux/cdev.h>
+#include <linux/ctype.h>
 #include <linux/device.h>
 #include <linux/filter.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/fs.h>
+
+// TODO
+// add CDEV_EXCLUSIVE_OPEN
+// add read from proc
 
 /////////////////////////////////////////////////
 // equation parser structs and functions
@@ -18,8 +24,155 @@
 static int size = 0;
 static int results[CAPACITY];
 
+static int postfix[CAPACITY];
+typedef enum
+{
+    NUMBER,
+    OPERATION
+} postfix_info;
+postfix_info info[CAPACITY];
+
+static int stack[CAPACITY];
+int top = -1;
+
+void push(int el)
+{
+    stack[++top] = el;
+}
+
+int pop(void)
+{
+    return stack[top--];
+}
+
+bool empty(void)
+{
+    return top < 0;
+}
+
+bool is_number(int index)
+{
+    return info[index] == NUMBER;
+}
+
+int priority(char el)
+{
+    switch (el)
+    {
+    case '(':
+        return 0;
+    case '+':
+    case '-':
+        return 1;
+    case '*':
+    case '/':
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+void infix_to_postfix(const char *infix)
+{
+    int i = 0;
+    int p = 0;
+    int temp_int = 0;
+    char el;
+    while ((el = infix[i++]) != '\0')
+    {
+        if (isspace(el)) {
+            continue;
+        }
+        if (isdigit(el))
+        {
+            temp_int = el - '0';
+            while ((el = infix[i++]) != '\0')
+            {
+                if (isdigit(el))
+                {
+                    temp_int = temp_int * 10 + (el - '0');
+                }
+                else
+                {
+                    break;
+                }
+            }
+            info[p] = NUMBER;
+            postfix[p++] = temp_int;
+            i--;
+        }
+        else if (el == '(')
+        {
+            push(el);
+        }
+        else if (el == ')')
+        {
+            while (stack[top] != '(')
+            {
+                info[p] = OPERATION;
+                postfix[p++] = pop();
+            }
+            pop();
+        }
+        else
+        {
+            while (!empty() && priority(stack[top]) >= priority(el))
+            {
+                info[p] = OPERATION;
+                postfix[p++] = pop();
+            }
+            push(el);
+        }
+    }
+    while (!empty())
+    {
+        info[p] = OPERATION;
+        postfix[p++] = pop();
+    }
+    postfix[p] = '\0';
+}
+
+int eval(void)
+{
+    int el;
+    int i = 0, op1, op2;
+    while ((el = postfix[i++]) != '\0')
+    {
+        if (is_number(i - 1))
+        {
+            push(el);
+        }
+        else
+        {
+            op2 = pop();
+            op1 = pop();
+            switch (el)
+            {
+            case '+':
+                push(op1 + op2);
+                break;
+            case '-':
+                push(op1 - op2);
+                break;
+            case '*':
+                push(op1 * op2);
+                break;
+            case '/':
+                push(op1 / op2);
+                break;
+            }
+        }
+    }
+    return pop();
+}
+
 static void parse_equation(const char *equation)
 {
+    int res = 0;
+    infix_to_postfix(equation);
+    res = eval();
+    pr_info("%d\n", res);
+    results[size++] = res;
     return;
 }
 
