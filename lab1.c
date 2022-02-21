@@ -12,10 +12,6 @@
 #include <linux/version.h>
 #include <linux/fs.h>
 
-// TODO
-// add CDEV_EXCLUSIVE_OPEN
-// add read from proc
-
 /////////////////////////////////////////////////
 // equation parser structs and functions
 /////////////////////////////////////////////////
@@ -171,7 +167,6 @@ static void parse_equation(const char *equation)
     int res = 0;
     infix_to_postfix(equation);
     res = eval();
-    pr_info("%d\n", res);
     results[size++] = res;
     return;
 }
@@ -181,11 +176,16 @@ static void parse_equation(const char *equation)
 /////////////////////////////////////////////////
 
 #define PROC_FILE_NAME "var2"
+#define START_MESSAGE "Calculated results:\n"
+#define MESSAGE_SIZE 100
 
 static struct proc_dir_entry *lab1_file;
 
 static ssize_t lab1_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
+    int len, i;
+    char message[MESSAGE_SIZE] = START_MESSAGE;
+    char number[MESSAGE_SIZE];
     pr_info("Proc file read\n");
 
     if (*offset > 0)
@@ -194,7 +194,25 @@ static ssize_t lab1_read(struct file *file_ptr, char __user *ubuffer, size_t buf
         return 0;
     }
 
-    return 0;
+    if (buf_length < MESSAGE_SIZE)
+    {
+        pr_info("Buffer not enough size\n");
+        return 0;
+    }
+
+    for (i = 0; i < size; i++)
+    {
+        sprintf(number, "%d\n", results[i]);
+        strcat(message,number);
+    }
+
+    len = strlen(message) + 1;
+    *offset += len;
+    if (copy_to_user(ubuffer, message, len)) {
+        pr_info("Didnt copy buffer message\n");
+        return -EFAULT;
+    }
+    return *offset;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
@@ -218,8 +236,8 @@ static const struct file_operations proc_file_ops = {
 #define CLASS_NAME "lab1_class"
 #define DEV_NAME "lab1_dev"
 
-#define BUF_MIN_SIZE 128
-static char message[BUF_MIN_SIZE];
+#define BUF_SIZE 128
+static char message[BUF_SIZE];
 
 static dev_t maj_min;
 static struct cdev cdev;
@@ -243,9 +261,9 @@ static ssize_t lab1_dev_write(struct file *file_ptr, const char __user *ubuffer,
 
     pr_info("Write to dev\n");
 
-    if (buf_length > BUF_MIN_SIZE)
+    if (buf_length > BUF_SIZE)
     {
-        len = BUF_MIN_SIZE;
+        len = BUF_SIZE;
     }
 
     if (copy_from_user(message, ubuffer, len))
