@@ -2,15 +2,15 @@
 #include <linux/ctype.h>
 #include <linux/device.h>
 #include <linux/filter.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
-#include <linux/fs.h>
 
 /////////////////////////////////////////////////
 // equation parser structs and functions
