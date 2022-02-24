@@ -14,66 +14,51 @@
 
 #include "parser.h"
 
-/////////////////////////////////////////////////
-// equation parser structs and functions
-/////////////////////////////////////////////////
+/*
+ * equation parser structs and functions
+ */
 
-static int size = 0;
-static int results[PARSER_CAPACITY];
-static int postfix[PARSER_CAPACITY];
-
-static void parse_equation(const char *equation)
+static int parse_equation(const char *equation)
 {
-    int res = 0;
+    int res;
+    int postfix[PARSER_CAPACITY];
     infix_to_postfix(equation, postfix);
     res = postfix_to_eval(postfix);
-    results[size++] = res;
-    return;
+    return res;
 }
 
-/////////////////////////////////////////////////
-// proc file structs and functions
-/////////////////////////////////////////////////
+/*
+ * proc file structs and functions
+ */
 
 #define PROC_FILE_NAME "var2"
 #define START_MESSAGE "Calculated results:\n"
-#define MESSAGE_SIZE 100
+#define MESSAGE_SIZE 1024
+static char message[MESSAGE_SIZE] = START_MESSAGE;
+static size_t message_len = sizeof(START_MESSAGE);
 
 static struct proc_dir_entry *lab1_file;
 
 static ssize_t lab1_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
-    int len, i;
-    char message[MESSAGE_SIZE] = START_MESSAGE;
-    char number[MESSAGE_SIZE];
+    size_t len = min(message_len - (size_t)*offset, buf_length);
+
     pr_info("Proc file read\n");
 
-    if (*offset > 0)
+    if (len <= 0)
     {
         pr_info("All done\n");
         return 0;
     }
 
-    if (buf_length < MESSAGE_SIZE)
-    {
-        pr_info("Buffer not enough size\n");
-        return 0;
-    }
-
-    for (i = 0; i < size; i++)
-    {
-        sprintf(number, "%d\n", results[i]);
-        strcat(message, number);
-    }
-
-    len = strlen(message) + 1;
-    *offset += len;
-    if (copy_to_user(ubuffer, message, len))
+    if (copy_to_user(ubuffer, message + *offset, len))
     {
         pr_info("Didnt copy buffer message\n");
         return -EFAULT;
     }
-    return *offset;
+
+    *offset += len;
+    return len;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
@@ -89,16 +74,16 @@ static const struct file_operations proc_file_ops = {
     .read = lab1_read};
 #endif
 
-/////////////////////////////////////////////////
-// char dev structs and functions
-/////////////////////////////////////////////////
+/*
+ * char dev structs and functions
+ */
 
 #define DEVICE_NAME "lab1_chrdev"
 #define CLASS_NAME "lab1_class"
 #define DEV_NAME "lab1_dev"
 
 #define BUF_SIZE 128
-static char message[BUF_SIZE];
+static char number_message[BUF_SIZE];
 
 static dev_t maj_min;
 static struct cdev cdev;
@@ -106,19 +91,15 @@ static struct class *cls;
 
 static ssize_t lab1_dev_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
-    size_t i;
-    pr_info("Calculated results:\n");
-
-    for (i = 0; i < size; i++)
-    {
-        pr_info("%d\n", results[i]);
-    }
+    pr_info("%s\n", message);
     return 0;
 }
 
 static ssize_t lab1_dev_write(struct file *file_ptr, const char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
+    char number[BUF_SIZE];
     size_t len = buf_length;
+    int res;
 
     pr_info("Write to dev\n");
 
@@ -127,13 +108,20 @@ static ssize_t lab1_dev_write(struct file *file_ptr, const char __user *ubuffer,
         len = BUF_SIZE;
     }
 
-    if (copy_from_user(message, ubuffer, len))
+    if (copy_from_user(number_message, ubuffer, len))
     {
         return -EFAULT;
     }
 
-    parse_equation(message);
-
+    res = parse_equation(number_message);
+    pr_info("%d\n", res);
+    sprintf(number, "%d\n", res);
+    message_len += strlen(number);
+    if (message_len < MESSAGE_SIZE) {
+        strcat(message, number);
+    } else {
+        pr_info("Not enough space to write new information\n");
+    }
     return len;
 }
 
@@ -149,9 +137,9 @@ static struct file_operations lab1_dev_fops =
         .read = lab1_dev_read,
         .write = lab1_dev_write};
 
-/////////////////////////////////////////////////
-// module init and exit
-/////////////////////////////////////////////////
+/*
+ * module init and exit
+ */
 
 static int __init lab1_init(void)
 {
