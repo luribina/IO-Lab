@@ -89,6 +89,31 @@ static dev_t maj_min;
 static struct cdev cdev;
 static struct class *cls;
 
+enum
+{
+    CDEV_NOT_USED = 0,
+    CDEV_EXCLUSIVE_OPEN = 1,
+};
+
+static atomic_t already_open = ATOMIC_INIT(CDEV_NOT_USED);
+
+static int lab1_dev_open(struct inode *inode, struct file *f)
+{
+    if (atomic_cmpxchg(&already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN))
+    {
+        return -EBUSY;
+    }
+    try_module_get(THIS_MODULE);
+    return 0;
+}
+
+static int lab1_dev_release(struct inode *inode, struct file *f)
+{
+    atomic_set(&already_open, CDEV_NOT_USED);
+    module_put(THIS_MODULE);
+    return 0;
+}
+
 static ssize_t lab1_dev_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
 {
     pr_info("%s\n", message);
@@ -134,6 +159,8 @@ static int cls_uevent(struct device *dev, struct kobj_uevent_env *env)
 static struct file_operations lab1_dev_fops =
     {
         .owner = THIS_MODULE,
+        .open = lab1_dev_open,
+        .release = lab1_dev_release,
         .read = lab1_dev_read,
         .write = lab1_dev_write};
 
