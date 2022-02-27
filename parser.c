@@ -51,12 +51,28 @@ static int priority(char el)
     }
 }
 
-void infix_to_postfix(const char *infix, int *postfix)
+int infix_to_postfix(const char *infix, int *postfix)
 {
-    int i = 0;
-    int p = 0;
-    int temp_int = 0;
+    int i = 0,
+        count = 0,
+        temp_int = 0;
     char el;
+
+    if (infix[i] == '-')
+    {
+        i++;
+        el = infix[i++];
+        while (isdigit(el))
+        {
+            temp_int = temp_int * 10 + (el - '0');
+            el = infix[i++];
+        }
+
+        info[count] = NUMBER;
+        postfix[count++] = -temp_int;
+        i--;
+    }
+
     while ((el = infix[i++]) != '\0')
     {
         if (isspace(el))
@@ -77,8 +93,8 @@ void infix_to_postfix(const char *infix, int *postfix)
                     break;
                 }
             }
-            info[p] = NUMBER;
-            postfix[p++] = temp_int;
+            info[count] = NUMBER;
+            postfix[count++] = temp_int;
             i--;
         }
         else if (el == '(')
@@ -89,8 +105,8 @@ void infix_to_postfix(const char *infix, int *postfix)
         {
             while (stack[top] != '(')
             {
-                info[p] = OPERATION;
-                postfix[p++] = pop();
+                info[count] = OPERATION;
+                postfix[count++] = pop();
             }
             pop();
         }
@@ -98,26 +114,27 @@ void infix_to_postfix(const char *infix, int *postfix)
         {
             while (!empty() && priority(stack[top]) >= priority(el))
             {
-                info[p] = OPERATION;
-                postfix[p++] = pop();
+                info[count] = OPERATION;
+                postfix[count++] = pop();
             }
             push(el);
         }
     }
     while (!empty())
     {
-        info[p] = OPERATION;
-        postfix[p++] = pop();
+        info[count] = OPERATION;
+        postfix[count++] = pop();
     }
-    postfix[p] = '\0';
+    postfix[count] = '\0';
+    return count;
 }
 
-int postfix_to_eval(const int *postfix)
+int postfix_to_eval(const int *postfix, int count)
 {
-    int el;
-    int i = 0, op1, op2;
-    while ((el = postfix[i++]) != '\0')
+    int i = 0, op1, op2, el;
+    while (i < count)
     {
+        el = postfix[i++];
         if (is_number(i - 1))
         {
             push(el);

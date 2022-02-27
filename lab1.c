@@ -22,8 +22,8 @@ static int parse_equation(const char *equation)
 {
     int res;
     int postfix[PARSER_CAPACITY];
-    infix_to_postfix(equation, postfix);
-    res = postfix_to_eval(postfix);
+    int count = infix_to_postfix(equation, postfix);
+    res = postfix_to_eval(postfix, count);
     return res;
 }
 
@@ -139,12 +139,14 @@ static ssize_t lab1_dev_write(struct file *file_ptr, const char __user *ubuffer,
     }
 
     res = parse_equation(number_message);
-    pr_info("%d\n", res);
     sprintf(number, "%d\n", res);
     message_len += strlen(number);
-    if (message_len < MESSAGE_SIZE) {
+    if (message_len < MESSAGE_SIZE)
+    {
         strcat(message, number);
-    } else {
+    }
+    else
+    {
         pr_info("Not enough space to write new information\n");
     }
     return len;
