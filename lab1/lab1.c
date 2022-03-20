@@ -80,13 +80,13 @@ static const struct file_operations proc_file_ops = {
 
 #define DEVICE_NAME "lab1_chrdev"
 #define CLASS_NAME "lab1_class"
-#define DEV_NAME "lab1_dev"
+#define DEV_NAME "lab1_dev%d"
+#define DEV_COUNT 4
 
 #define BUF_SIZE 128
 static char number_message[BUF_SIZE];
 
 static dev_t maj_min;
-static struct cdev cdev;
 static struct class *cls;
 
 enum
@@ -170,16 +170,36 @@ static struct file_operations lab1_dev_fops =
  * module init and exit
  */
 
+static int full = 0;
+
+static dev_t maj_mins[DEV_COUNT];
+static struct cdev cdevs[DEV_COUNT];
+
+static void clear_all_full(void)
+{
+    int i = 0;
+	for (i = 0; i < full; i++) {
+		device_destroy(cls, maj_mins[i]);
+		cdev_del(&cdevs[i]);
+	}
+	class_destroy(cls);
+	unregister_chrdev_region(maj_min, DEV_COUNT);
+}
+
 static int __init lab1_init(void)
 {
+    int i = 0;
+    int major;
+
     pr_info("Loaded lab1 module\n");
 
-    if (alloc_chrdev_region(&maj_min, 0, 1, DEVICE_NAME) < 0)
+    if (alloc_chrdev_region(&maj_min, 0, DEV_COUNT, DEVICE_NAME) < 0)
     {
         pr_alert("Can not alloc chrdev region\n");
         return -1;
     }
 
+    major = MAJOR(maj_min);
     cls = class_create(THIS_MODULE, CLASS_NAME);
     if (cls == NULL)
     {
@@ -189,22 +209,26 @@ static int __init lab1_init(void)
     }
     cls->dev_uevent = cls_uevent;
 
-    if (device_create(cls, NULL, maj_min, NULL, DEV_NAME) == NULL)
+    for (i = 0; i < DEV_COUNT; i++)
     {
-        pr_alert("Can not create device\n");
-        class_destroy(cls);
-        unregister_chrdev_region(maj_min, 1);
-        return -1;
-    }
+        maj_mins[i] = MKDEV(major, i);
+        cdev_init(&cdevs[i], &lab1_dev_fops);
 
-    cdev_init(&cdev, &lab1_dev_fops);
-    if (cdev_add(&cdev, maj_min, 1) < 0)
-    {
-        pr_alert("Can not add char device\n");
-        device_destroy(cls, maj_min);
-        class_destroy(cls);
-        unregister_chrdev_region(maj_min, 1);
-        return -1;
+        if (cdev_add(&cdevs[i], maj_mins[i], 1) < 0)
+        {
+            pr_alert("Can not add char device\n");
+            clear_all_full();
+        }
+
+        if (device_create(cls, NULL, maj_mins[i], NULL, DEV_NAME, i) == NULL)
+        {
+            pr_alert("Can not create device\n");
+            cdev_del(&cdevs[i]);
+            clear_all_full();
+            return -1;
+        }
+
+        full++;
     }
 
     lab1_file = proc_create(PROC_FILE_NAME, 0444, NULL, &proc_file_ops);
@@ -212,10 +236,7 @@ static int __init lab1_init(void)
     if (lab1_file == NULL)
     {
         pr_alert("Can not create file for some reason\n");
-        cdev_del(&cdev);
-        device_destroy(cls, maj_min);
-        class_destroy(cls);
-        unregister_chrdev_region(maj_min, 1);
+        clear_all_full();
         return -1;
     }
 
@@ -226,10 +247,7 @@ static int __init lab1_init(void)
 static void __exit lab1_exit(void)
 {
     proc_remove(lab1_file);
-    cdev_del(&cdev);
-    device_destroy(cls, maj_min);
-    class_destroy(cls);
-    unregister_chrdev_region(maj_min, 1);
+    clear_all_full();
     pr_info("Unloaded lab1 module\n");
 }
 
