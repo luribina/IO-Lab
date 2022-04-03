@@ -1,12 +1,11 @@
-#include <linux/bio.h>
+#include <linux/blk-mq.h>
 #include <linux/blkdev.h>
-#include <linux/errno.h>
-#include <linux/fcntl.h>
+#include <linux/buffer_head.h>
 #include <linux/fs.h>
 #include <linux/genhd.h>
+#include <linux/init.h>
 #include <linux/module.h>
-#include <linux/string.h>
-#include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 //------------------------------------------------------------------------
@@ -175,7 +174,6 @@ static const PartTable def_log_part_table[] = {
 static void copy_mbr(u8 *disk)
 {
     memset(disk, 0x0, MBR_SIZE);
-    *(unsigned long *)(disk + MBR_DISK_SIGNATURE_OFFSET) = 0x36E5756D;
     memcpy(disk + PARTITION_TABLE_OFFSET, &def_part_table, PARTITION_TABLE_SIZE);
     *(unsigned short *)(disk + MBR_SIGNATURE_OFFSET) = MBR_SIGNATURE;
 }
@@ -192,7 +190,6 @@ static void copy_br(u8 *disk, int abs_start_sector, const PartTable *part_table)
 static void copy_mbr_n_br(u8 *disk)
 {
     int i;
-
     copy_mbr(disk);
     for (i = 0; i < ARRAY_SIZE(def_log_part_table); i++)
     {
@@ -214,20 +211,20 @@ static struct ram_device
 {
 	unsigned int size;
 	u8 * data;
-	spinlock_t lock;
+	struct blk_mq_tag_set tag_set;
 	struct request_queue *queue;
 	struct gendisk *gd;
 } device;
 
 static int bdev_open(struct block_device *bdev, fmode_t mode)
 {
-	printk(KERN_INFO "mydiskdrive : open \n");
+	printk(DEV_NAME " : open \n");
 	return 0;
 }
 
 static void bdev_release(struct gendisk *gd, fmode_t mode)
 {
-	printk(KERN_INFO "mydiskdrive : closed \n");
+	printk(DEV_NAME " : closed \n");
 }
 
 static struct block_device_operations fops =
@@ -237,14 +234,12 @@ static struct block_device_operations fops =
 		.release = bdev_release,
 };
 
-static int rb_transfer(struct request *req)
+static int rb_transfer(struct request *req, unsigned int *nr_bytes)
 {
 	int dir = rq_data_dir(req);
 	int ret = 0;
-	/*starting sector
-	 *where to do operation*/
 	sector_t start_sector = blk_rq_pos(req);
-	unsigned int sector_cnt = blk_rq_sectors(req); /* no of sector on which opn to be done*/
+	unsigned int sector_cnt = blk_rq_sectors(req);
 	struct bio_vec bv;
 #define BV_PAGE(bv) ((bv).bv_page)
 #define BV_OFFSET(bv) ((bv).bv_offset)
@@ -263,40 +258,55 @@ static int rb_transfer(struct request *req)
 			ret = -EIO;
 		}
 		sectors = BV_LEN(bv) / SECTOR_SIZE;
-		printk(KERN_DEBUG "my disk: Start Sector: %llu, Sector Offset: %llu;\
-		Buffer: %p; Length: %u sectors\n",
-			   (unsigned long long)(start_sector), (unsigned long long)(sector_offset), buffer, sectors);
 
-		if (dir == WRITE) /* Write to the device */
+		if (dir == WRITE)
 		{
 			memcpy((device.data) + ((start_sector + sector_offset) * SECTOR_SIZE), buffer, sectors * SECTOR_SIZE);
 		}
-		else /* Read from the device */
+		else
 		{
 			memcpy(buffer, (device.data) + ((start_sector + sector_offset) * SECTOR_SIZE), sectors * SECTOR_SIZE);
 		}
 		sector_offset += sectors;
+		*nr_bytes += BV_LEN(bv);
 	}
 
 	if (sector_offset != sector_cnt)
 	{
-		printk(KERN_ERR "mydisk: bio info doesn't match with the request info");
+		printk("mydisk: bio info doesn't match with the request info");
 		ret = -EIO;
 	}
 	return ret;
 }
 
-/** request handling function**/
-static void dev_request(struct request_queue *q)
+static blk_status_t queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data* bd)
 {
-	struct request *req;
-	int error;
-	while ((req = blk_fetch_request(q)) != NULL)
-	{
-		error = rb_transfer(req);
-		__blk_end_request_all(req, error);
-	}
+    unsigned int nr_bytes = 0;
+    blk_status_t status = BLK_STS_OK;
+    struct request *rq = bd->rq;
+
+    /* Start request serving procedure */
+    blk_mq_start_request(rq);
+
+    if (rb_transfer(rq, &nr_bytes) != 0) {
+        status = BLK_STS_IOERR;
+    }
+
+    /* Notify kernel about processed nr_bytes */
+    if (blk_update_request(rq, status, nr_bytes)) {
+        /* Shouldn't fail */
+        BUG();
+    }
+
+    /* Stop request serving procedure */
+    __blk_mq_end_request(rq, status);
+
+    return status;
 }
+
+static struct blk_mq_ops mq_ops = {
+    .queue_rq = queue_rq,
+};
 
 //------------------------------------------------------------------------
 
@@ -316,40 +326,43 @@ static int __init lab2_init(void)
 {
 	device.size = ramdisk_init();
 	printk(KERN_INFO "THIS IS DEVICE SIZE %d", device.size);
-	
+
 	if ((major = register_blkdev(0, DEV_NAME)) < 0)
-		goto out_register;
+	{
+		printk("Failed to register block_dev\n");
+		ramdisk_cleanup();
+		return -ENOMEM;
+	}
 
-	printk(KERN_INFO "Major Number is : %d", major);
-	spin_lock_init(&device.lock);
-	
-	if (!(device.queue = blk_init_queue(dev_request, &device.lock)))
-		goto out_init_queue;
+	printk("Major Number is : %d", major);
+	if (!(device.queue = blk_mq_init_sq_queue(&device.tag_set, &mq_ops, 128, BLK_MQ_F_SHOULD_MERGE)))
+	{
+		printk("Failed init queue\n");
+		unregister_blkdev(major, DEV_NAME);
+		ramdisk_cleanup();
+		return -ENOMEM;
+	}
 
-	if (!(device.gd = alloc_disk(8)))
-		goto out_alloc_gendisk;
+    device.queue->queuedata = &device;
 
-	device.gd->major = major;
-	device.gd->first_minor = 0;
+    if (!(device.gd = alloc_disk(8))) {
+		printk(KERN_INFO "Failed alloc disk\n");
+		blk_cleanup_queue(device.queue);
+		unregister_blkdev(major, DEV_NAME);
+		ramdisk_cleanup();
+		return -ENOMEM;
+	}
+
+    device.gd->major = major;
+    device.gd->first_minor = 0;
 	device.gd->fops = &fops;
-	device.gd->private_data = &device;
 	device.gd->queue = device.queue;
-	
-	sprintf(((device.gd)->disk_name), DEV_NAME);
+	device.gd->private_data = &device;
+
+    sprintf(((device.gd)->disk_name), DEV_NAME);
 	set_capacity(device.gd, device.size);
 	add_disk(device.gd);
 	return 0;
-
-out_alloc_gendisk:
-	blk_cleanup_queue(device.queue);
-	printk(KERN_INFO "Failed alloc disk\n");
-out_init_queue:
-	unregister_blkdev(major, DEV_NAME);
-	printk(KERN_INFO "Failed init queue\n");
-out_register:
-	ramdisk_cleanup();
-	printk(KERN_INFO "Failed register\n");
-	return -1;
 }
 
 static void __exit lab2_exit(void)
@@ -370,3 +383,9 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("luribina");
 MODULE_DESCRIPTION("io lab2");
 MODULE_VERSION("1.0");
+
+
+//      |\      _,,,---,,_
+//      /,`.-'`'    -.  ;-;;,_
+//     |,4-  ) )-,_. ,\ (  `'-'
+//    '---''(_/--'  `-'\_) 
