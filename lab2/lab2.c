@@ -5,8 +5,11 @@
 #include <linux/genhd.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
+
 
 //------------------------------------------------------------------------
 
@@ -310,11 +313,40 @@ static struct blk_mq_ops mq_ops = {
 
 //------------------------------------------------------------------------
 
-static int ramdisk_init(void)
+/*
+	Proc file structs and functions
+*/
+
+#define BUF_MIN_SIZE 128
+#define PROC_FILE_NAME "lab2out"
+
+static struct proc_dir_entry *out_file;
+static char lab2_write_buffer[BUF_MIN_SIZE];
+
+static ssize_t proc_write(struct file *file_ptr, const char __user *ubuffer, size_t buf_length, loff_t *offset);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#define HAVE_PROC_OPS
+#endif
+
+#ifdef HAVE_PROC_OPS
+static const struct proc_ops proc_file_ops = {
+    .proc_write = proc_write
+};
+#else
+static const struct file_operations proc_file_ops = {
+    .owner = THIS_MODULE,
+    .write = proc_write
+};
+#endif
+
+//------------------------------------------------------------------------
+
+static int ramdisk_init(int block_count)
 {
-	(device.data) = vmalloc(MEMSIZE * SECTOR_SIZE);
-	copy_mbr_n_br(device.data);
-	return MEMSIZE;
+	(device.data) = vmalloc(block_count * SECTOR_SIZE);
+	// copy_mbr_n_br(device.data);
+	return block_count;
 }
 
 static void ramdisk_cleanup(void)
@@ -322,9 +354,9 @@ static void ramdisk_cleanup(void)
 	vfree(device.data);
 }
 
-static int __init lab2_init(void)
+static int device_init(int block_count)
 {
-	device.size = ramdisk_init();
+	device.size = ramdisk_init(block_count);
 	printk(KERN_INFO "THIS IS DEVICE SIZE %d", device.size);
 
 	if ((major = register_blkdev(0, DEV_NAME)) < 0)
@@ -345,7 +377,7 @@ static int __init lab2_init(void)
 
     device.queue->queuedata = &device;
 
-    if (!(device.gd = alloc_disk(8))) {
+    if (!(device.gd = alloc_disk(1))) {
 		printk(KERN_INFO "Failed alloc disk\n");
 		blk_cleanup_queue(device.queue);
 		unregister_blkdev(major, DEV_NAME);
@@ -353,6 +385,7 @@ static int __init lab2_init(void)
 		return -ENOMEM;
 	}
 
+	device.gd->flags = GENHD_FL_NO_PART_SCAN;
     device.gd->major = major;
     device.gd->first_minor = 0;
 	device.gd->fops = &fops;
@@ -362,16 +395,77 @@ static int __init lab2_init(void)
     sprintf(((device.gd)->disk_name), DEV_NAME);
 	set_capacity(device.gd, device.size);
 	add_disk(device.gd);
+
 	return 0;
 }
 
-static void __exit lab2_exit(void)
+static void device_clean(void)
 {
 	del_gendisk(device.gd);
 	put_disk(device.gd);
 	blk_cleanup_queue(device.queue);
 	unregister_blkdev(major, DEV_NAME);
 	ramdisk_cleanup();
+}
+
+static int __init lab2_init(void)
+{
+	out_file = proc_create(PROC_FILE_NAME, 0666, NULL, &proc_file_ops);
+
+    if (out_file == NULL) {
+        pr_alert("Could not create file for some reason\n");
+        return -EIO;
+    }
+
+	return device_init(MEMSIZE);
+}
+
+static void __exit lab2_exit(void)
+{
+	device_clean();
+	proc_remove(out_file);
+}
+
+//------------------------------------------------------------------------
+
+static ssize_t proc_write(struct file *file_ptr, const char __user *ubuffer, size_t buf_length, loff_t *offset)
+{
+	int r, disk_size;
+	size_t len = buf_length;
+
+	pr_info("Proc file %s is write start\n", PROC_FILE_NAME);
+
+	if (buf_length > BUF_MIN_SIZE - 1)
+	{
+		len = BUF_MIN_SIZE - 1;
+	}
+
+	if (copy_from_user(lab2_write_buffer, ubuffer, len))
+	{
+		return -EFAULT;
+	}
+
+	r = sscanf(lab2_write_buffer, "%d", &disk_size);
+	if (r != 1)
+	{
+		pr_info("Got non matching input\n");
+		return buf_length;
+	}
+
+	if (disk_size <= 0)
+	{
+		pr_info("Size can not be below or equal zero, disk didn't change\n");
+		return buf_length;
+	}
+
+	pr_info("New disk size is %d MB\n", disk_size);
+
+	device_clean();
+	device_init(disk_size * 2048);
+
+	pr_info("Proc file %s is write end\n", PROC_FILE_NAME);
+
+	return buf_length;
 }
 
 //------------------------------------------------------------------------
