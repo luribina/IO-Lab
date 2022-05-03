@@ -1,18 +1,31 @@
 #include <linux/etherdevice.h>
 #include <linux/in.h>
+#include <linux/inet.h>
 #include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
+#include <linux/proc_fs.h>
+#include <linux/string.h>
 #include <linux/udp.h>
 #include <linux/version.h>
 #include <net/arp.h>
 
-static char *link = "enp0s3";
+//------------------------------------------------------------------------
+
+/*
+    Virtual network interface structs and functions
+*/
+
+static char *link = "lo";
 module_param(link, charp, 0);
 
+static char *dest = "127.0.0.11";
+module_param(dest, charp, 0);
+
+static int dest1 = 127, dest2 = 0, dest3 = 0, dest4 = 11;
+
 static char *ifname = "vni%d";
-static unsigned char data[1500];
 
 static struct net_device_stats stats;
 
@@ -22,32 +35,55 @@ struct priv
     struct net_device *parent;
 };
 
+#define MESSAGE_SIZE 1024
+static char message[MESSAGE_SIZE];
+static size_t message_len;
+
 static char check_frame(struct sk_buff *skb, unsigned char data_shift)
 {
-    unsigned char *user_data_ptr = NULL;
-    struct iphdr *ip = (struct iphdr *)skb_network_header(skb);
-    struct udphdr *udp = NULL;
-    int data_len = 0;
+    const struct iphdr *ip = (struct iphdr *)skb_network_header(skb);
 
-    if (IPPROTO_UDP == ip->protocol)
-    {
-        udp = (struct udphdr *)((unsigned char *)ip + (ip->ihl * 4));
-        data_len = ntohs(udp->len) - sizeof(struct udphdr);
-        user_data_ptr = (unsigned char *)(skb->data + sizeof(struct iphdr) + sizeof(struct udphdr)) + data_shift;
-        memcpy(data, user_data_ptr, data_len);
-        data[data_len] = '\0';
+    const u32 saddr = ntohl(ip->saddr);
+    const u32 daddr = ntohl(ip->daddr);
 
-        pr_info("Captured UDP datagram, saddr: %d.%d.%d.%d\n",
-               ntohl(ip->saddr) >> 24, (ntohl(ip->saddr) >> 16) & 0x00FF,
-               (ntohl(ip->saddr) >> 8) & 0x0000FF, (ntohl(ip->saddr)) & 0x000000FF);
-        pr_info("daddr: %d.%d.%d.%d\n",
-               ntohl(ip->daddr) >> 24, (ntohl(ip->daddr) >> 16) & 0x00FF,
-               (ntohl(ip->daddr) >> 8) & 0x0000FF, (ntohl(ip->daddr)) & 0x000000FF);
+    const int d1 = daddr >> 24,
+              d2 = (daddr >> 16) & 0x00FF,
+              d3 = (daddr >> 8) & 0x0000FF,
+              d4 = (daddr)&0x000000FF;
 
-        pr_info("Data length: %d. Data:", data_len);
-        pr_info("%s", data);
+    int len = 0;
+
+    if (ip->version == 4 && d1==dest1 && d2==dest2 && d3==dest3 && d4==dest4) {
+        char saddr_str[128];
+        char daddr_str[128];
+
+        sprintf(saddr_str, "saddr: %d.%d.%d.%d\n",
+                saddr >> 24,
+                (saddr >> 16) & 0x00FF,
+                (saddr >> 8) & 0x0000FF,
+                (saddr) & 0x000000FF);
+
+        sprintf(daddr_str, "daddr: %d.%d.%d.%d\n", d1, d2, d3, d4);
+
+        pr_info("%s", saddr_str);
+        pr_info("%s", daddr_str);
+
+        len = strlen(saddr_str) + strlen(daddr_str);
+
+        if (message_len + len > MESSAGE_SIZE) {
+            pr_info("Message buffer is full\n");
+            strcpy(message, saddr_str);
+            message_len = 0;
+        } else {
+            strcat(message, saddr_str);
+        }
+        strcat(message, daddr_str);
+
+        message_len += len;
+
         return 1;
     }
+
     return 0;
 }
 
@@ -125,6 +161,57 @@ static void setup(struct net_device *dev)
     }
 }
 
+//------------------------------------------------------------------------
+
+/*
+    Proc device structs and functions
+*/
+
+#define PROC_FILE_NAME "var2"
+
+static struct proc_dir_entry *lab3_file;
+
+static ssize_t lab3_read(struct file *file_ptr, char __user *ubuffer, size_t buf_length, loff_t *offset)
+{
+    int len = min(message_len - (size_t)*offset, buf_length);
+
+    pr_info("Proc file read\n");
+
+    if (len <= 0)
+    {
+        pr_info("All done\n");
+        return 0;
+    }
+
+    if (copy_to_user(ubuffer, message + *offset, len))
+    {
+        pr_info("Didnt copy buffer message\n");
+        return -EFAULT;
+    }
+
+    *offset += len;
+    return len;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#define HAVE_PROC_OPS
+#endif
+
+#ifdef HAVE_PROC_OPS
+static const struct proc_ops proc_file_ops = {
+    .proc_read = lab3_read};
+#else
+static const struct file_operations proc_file_ops = {
+    .owner = THIS_MODULE,
+    .read = lab3_read};
+#endif
+
+//------------------------------------------------------------------------
+
+/*
+    Init and exit functions
+*/
+
 int __init lab3_init(void)
 {
     int err = 0;
@@ -164,6 +251,28 @@ int __init lab3_init(void)
     rtnl_lock();
     netdev_rx_handler_register(priv->parent, &handle_frame, NULL);
     rtnl_unlock();
+
+    lab3_file = proc_create(PROC_FILE_NAME, 0444, NULL, &proc_file_ops);
+
+    if (lab3_file == NULL)
+    {
+        pr_alert("Can not create file for some reason\n");
+        rtnl_lock();
+        netdev_rx_handler_unregister(priv->parent);
+        rtnl_unlock();
+        pr_info("%s: unregister rx handler for %s", THIS_MODULE->name, priv->parent->name);
+        unregister_netdev(child);
+        free_netdev(child);
+        return -1;
+    }
+
+    u32 dest_addr = ntohl(in_aton(dest));
+    dest1 = dest_addr >> 24;
+    dest2 = (dest_addr >> 16) & 0x00FF;
+    dest3 = (dest_addr >> 8) & 0x0000FF;
+    dest4 = (dest_addr) & 0x000000FF;
+    pr_info("Init addr: %d.%d.%d.%d\n", dest1, dest2, dest3, dest4);
+
     pr_info("Module %s loaded", THIS_MODULE->name);
     pr_info("%s: create link %s", THIS_MODULE->name, child->name);
     pr_info("%s: registered rx handler for %s", THIS_MODULE->name, priv->parent->name);
@@ -173,6 +282,7 @@ int __init lab3_init(void)
 void __exit lab3_exit(void)
 {
     struct priv *priv = netdev_priv(child);
+    proc_remove(lab3_file);
     if (priv->parent)
     {
         rtnl_lock();
