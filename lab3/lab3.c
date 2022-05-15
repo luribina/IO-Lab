@@ -17,6 +17,9 @@
     Virtual network interface structs and functions
 */
 
+static const char * devices[] = {"lo", "enp0s3", "enp0s8"};
+#define devices_size (sizeof(devices) / sizeof(char *))
+
 static char *link = "lo";
 module_param(link, charp, 0);
 
@@ -32,10 +35,11 @@ static struct net_device_stats stats;
 static struct net_device *child = NULL;
 struct priv
 {
+    struct net_device *interfaces[devices_size];
     struct net_device *parent;
 };
 
-#define MESSAGE_SIZE 1024
+#define MESSAGE_SIZE 4096
 static char message[MESSAGE_SIZE];
 static size_t message_len;
 
@@ -57,20 +61,18 @@ static char check_frame(struct sk_buff *skb, unsigned char data_shift)
         char saddr_str[128];
         char daddr_str[128];
 
-        sprintf(saddr_str, "saddr: %d.%d.%d.%d\n",
+        len = sprintf(saddr_str, "saddr: %d.%d.%d.%d\n",
                 saddr >> 24,
                 (saddr >> 16) & 0x00FF,
                 (saddr >> 8) & 0x0000FF,
                 (saddr) & 0x000000FF);
 
-        sprintf(daddr_str, "daddr: %d.%d.%d.%d\n", d1, d2, d3, d4);
+        len += sprintf(daddr_str, "daddr: %d.%d.%d.%d\n\n", d1, d2, d3, d4);
 
         pr_info("%s", saddr_str);
         pr_info("%s", daddr_str);
 
-        len = strlen(saddr_str) + strlen(daddr_str);
-
-        if (message_len + len > MESSAGE_SIZE) {
+        if (message_len + len >= MESSAGE_SIZE) {
             pr_info("Message buffer is full\n");
             strcpy(message, saddr_str);
             message_len = 0;
@@ -89,17 +91,13 @@ static char check_frame(struct sk_buff *skb, unsigned char data_shift)
 
 static rx_handler_result_t handle_frame(struct sk_buff **pskb)
 {
-    // if (child) {
-
-    if (check_frame(*pskb, 0))
+    struct sk_buff * skb = * pskb;
+    if (check_frame(skb, 0))
     {
         stats.rx_packets++;
-        stats.rx_bytes += (*pskb)->len;
+        stats.rx_bytes += skb->len;
     }
-    (*pskb)->dev = child;
-    return RX_HANDLER_ANOTHER;
-    //}
-    // return RX_HANDLER_PASS;
+    return RX_HANDLER_PASS;
 }
 
 static int open(struct net_device *dev)
@@ -120,18 +118,14 @@ static netdev_tx_t start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct priv *priv = netdev_priv(dev);
 
-    if (check_frame(skb, 14))
-    {
-        stats.tx_packets++;
-        stats.tx_bytes += skb->len;
-    }
+    stats.tx_packets++;
+    stats.tx_bytes += skb->len;
 
     if (priv->parent)
     {
         skb->dev = priv->parent;
         skb->priority = 1;
         dev_queue_xmit(skb);
-        return 0;
     }
     return NETDEV_TX_OK;
 }
@@ -149,15 +143,70 @@ static struct net_device_ops net_device_ops = {
 
 static void setup(struct net_device *dev)
 {
-    int i;
     ether_setup(dev);
     memset(netdev_priv(dev), 0, sizeof(struct priv));
     dev->netdev_ops = &net_device_ops;
+}
 
-    // fill in the MAC address
-    for (i = 0; i < ETH_ALEN; i++)
+static int fill_priv(struct priv * priv)
+{
+    int i = 0;
+    for (i = 0; i < devices_size; ++i)
     {
-        dev->dev_addr[i] = (char)i;
+        priv->interfaces[i] = __dev_get_by_name(&init_net, devices[i]);
+        if (!priv->interfaces[i])
+        {
+            pr_err("%s: no such net: %s", THIS_MODULE->name, link);
+            return -ENODEV;
+        }
+
+        if (priv->interfaces[i]->type != ARPHRD_ETHER && priv->interfaces[i]->type != ARPHRD_LOOPBACK)
+        {
+            pr_err("%s: illegal net type", THIS_MODULE->name);
+            return -EINVAL;
+        }
+    }
+
+    priv->parent = __dev_get_by_name(&init_net, link);
+    if (!priv->parent)
+    {
+        pr_err("%s: no such net: %s", THIS_MODULE->name, link);
+        return -ENODEV;
+    }
+
+    if (priv->parent->type != ARPHRD_ETHER && priv->parent->type != ARPHRD_LOOPBACK)
+    {
+        pr_err("%s: illegal net type", THIS_MODULE->name);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+int register_handlers(struct priv * priv)
+{
+    int i = 0;
+    int err = 0;
+    for (i = 0; i < devices_size; ++i)
+    {
+        rtnl_lock();
+        err = netdev_rx_handler_register(priv->interfaces[i], handle_frame, NULL);
+        rtnl_unlock();
+        if (err != 0) {
+            pr_info("error on registering handler for device %s\n", devices[i]);
+            return err;
+        }
+    }
+    return 0;
+}
+
+void unregister_handlers(struct priv * priv)
+{
+    int i = 0;
+    for (i = 0; i < devices_size; ++i)
+    {
+        rtnl_lock();
+        netdev_rx_handler_unregister(priv->interfaces[i]);
+        rtnl_unlock();
     }
 }
 
@@ -216,30 +265,27 @@ int __init lab3_init(void)
 {
     int err = 0;
     struct priv *priv;
+    u32 dest_addr = ntohl(in_aton(dest));
+
     child = alloc_netdev(sizeof(struct priv), ifname, NET_NAME_UNKNOWN, setup);
+    
     if (child == NULL)
     {
         pr_err("%s: allocate error", THIS_MODULE->name);
         return -ENOMEM;
     }
+    
     priv = netdev_priv(child);
-    priv->parent = __dev_get_by_name(&init_net, link); // parent interface
-    if (!priv->parent)
-    {
-        pr_err("%s: no such net: %s", THIS_MODULE->name, link);
+    err = fill_priv(priv);
+    if (err !=0) {
         free_netdev(child);
-        return -ENODEV;
-    }
-    if (priv->parent->type != ARPHRD_ETHER && priv->parent->type != ARPHRD_LOOPBACK)
-    {
-        pr_err("%s: illegal net type", THIS_MODULE->name);
-        free_netdev(child);
-        return -EINVAL;
+        return err;
     }
 
     // copy IP, MAC and other information
     memcpy(child->dev_addr, priv->parent->dev_addr, ETH_ALEN);
     memcpy(child->broadcast, priv->parent->broadcast, ETH_ALEN);
+    
     if ((err = dev_alloc_name(child, child->name)))
     {
         pr_err("%s: allocate name, error %i", THIS_MODULE->name, err);
@@ -247,26 +293,25 @@ int __init lab3_init(void)
         return -EIO;
     }
 
+    err = register_handlers(priv);
+    if (err !=0) {
+        free_netdev(child);
+        return err;
+    }
+
     register_netdev(child);
-    rtnl_lock();
-    netdev_rx_handler_register(priv->parent, &handle_frame, NULL);
-    rtnl_unlock();
 
     lab3_file = proc_create(PROC_FILE_NAME, 0444, NULL, &proc_file_ops);
 
     if (lab3_file == NULL)
     {
         pr_alert("Can not create file for some reason\n");
-        rtnl_lock();
-        netdev_rx_handler_unregister(priv->parent);
-        rtnl_unlock();
-        pr_info("%s: unregister rx handler for %s", THIS_MODULE->name, priv->parent->name);
+        unregister_handlers(priv);
         unregister_netdev(child);
         free_netdev(child);
         return -1;
     }
 
-    u32 dest_addr = ntohl(in_aton(dest));
     dest1 = dest_addr >> 24;
     dest2 = (dest_addr >> 16) & 0x00FF;
     dest3 = (dest_addr >> 8) & 0x0000FF;
@@ -283,13 +328,8 @@ void __exit lab3_exit(void)
 {
     struct priv *priv = netdev_priv(child);
     proc_remove(lab3_file);
-    if (priv->parent)
-    {
-        rtnl_lock();
-        netdev_rx_handler_unregister(priv->parent);
-        rtnl_unlock();
-        pr_info("%s: unregister rx handler for %s", THIS_MODULE->name, priv->parent->name);
-    }
+    unregister_handlers(priv);
+
     unregister_netdev(child);
     free_netdev(child);
     pr_info("Module %s unloaded", THIS_MODULE->name);
